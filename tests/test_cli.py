@@ -86,6 +86,46 @@ class CLITests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("greater than zero", error)
 
+            code, _, error = self.run_cli(
+                root, "config", "--context-window-tokens", "0"
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("greater than zero", error)
+
+            code, _, error = self.run_cli(
+                root,
+                "config",
+                "--max-output-tokens",
+                "1000",
+                "--context-window-tokens",
+                "1000",
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("must be smaller", error)
+
+    def test_context_window_can_be_initialized_updated_and_displayed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            code, output, _ = self.run_cli(
+                root,
+                "init",
+                "--provider",
+                "openai",
+                "--context-window-tokens",
+                "64000",
+            )
+            self.assertEqual(code, 0)
+
+            code, output, _ = self.run_cli(root, "config")
+            self.assertEqual(code, 0)
+            self.assertIn("Context window tokens: 64000", output)
+
+            code, output, _ = self.run_cli(
+                root, "config", "--context-window-tokens", "32000"
+            )
+            self.assertEqual(code, 0)
+            self.assertIn("Context window tokens: 32000", output)
+
 
 if __name__ == "__main__":
     unittest.main()

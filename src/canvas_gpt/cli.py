@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import __version__
 from .errors import CanvasGPTError
-from .models import DEFAULT_MODELS, Config, Graph, Message, Node
+from .models import DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_MODELS, Config, Graph, Message, Node
 from .providers import Provider, build_provider
 from .service import CONNECT_EDGE_TYPES, GraphService
 from .storage import Workspace
@@ -28,6 +28,9 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--provider", choices=tuple(DEFAULT_MODELS), default=None)
     init_parser.add_argument("--model", help="Provider model ID.")
     init_parser.add_argument("--max-output-tokens", type=int, default=2048)
+    init_parser.add_argument(
+        "--context-window-tokens", type=int, default=DEFAULT_CONTEXT_WINDOW_TOKENS
+    )
     init_parser.add_argument("--force", action="store_true", help="Reset existing local graph data.")
 
     new_parser = commands.add_parser("new", help="Create an empty conversation node.")
@@ -62,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     config_parser.add_argument("--provider", choices=tuple(DEFAULT_MODELS))
     config_parser.add_argument("--model")
     config_parser.add_argument("--max-output-tokens", type=int)
+    config_parser.add_argument("--context-window-tokens", type=int)
     return parser
 
 
@@ -115,13 +119,19 @@ def main(
 def _run_init(workspace: Workspace, args: argparse.Namespace) -> int:
     provider = args.provider or _choose_provider()
     model = args.model or DEFAULT_MODELS[provider]
-    if args.max_output_tokens < 1:
-        raise CanvasGPTError("--max-output-tokens must be greater than zero.")
-    config = Config(provider=provider, model=model, max_output_tokens=args.max_output_tokens)
+    config = Config(
+        provider=provider,
+        model=model,
+        max_output_tokens=args.max_output_tokens,
+        context_window_tokens=args.context_window_tokens,
+    )
+    _validate_token_config(config)
     workspace.initialize(config, force=args.force)
     env_name = "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY"
     print(f"Initialized Canvas GPT in {workspace.data_dir}")
     print(f"Provider: {provider} ({model})")
+    print(f"Context window tokens: {config.context_window_tokens}")
+    print(f"Max output tokens: {config.max_output_tokens}")
     print(f"Set {env_name} before running chat or merge.")
     return 0
 
@@ -147,17 +157,31 @@ def _run_config(workspace: Workspace, args: argparse.Namespace) -> int:
         config.model = args.model
         changed = True
     if args.max_output_tokens is not None:
-        if args.max_output_tokens < 1:
-            raise CanvasGPTError("--max-output-tokens must be greater than zero.")
         config.max_output_tokens = args.max_output_tokens
         changed = True
+    if args.context_window_tokens is not None:
+        config.context_window_tokens = args.context_window_tokens
+        changed = True
+    _validate_token_config(config)
     if changed:
         workspace.save_config(config)
         print("Configuration updated.")
     print(f"Provider: {config.provider}")
     print(f"Model: {config.model}")
     print(f"Max output tokens: {config.max_output_tokens}")
+    print(f"Context window tokens: {config.context_window_tokens}")
     return 0
+
+
+def _validate_token_config(config: Config) -> None:
+    if config.max_output_tokens < 1:
+        raise CanvasGPTError("--max-output-tokens must be greater than zero.")
+    if config.context_window_tokens < 1:
+        raise CanvasGPTError("--context-window-tokens must be greater than zero.")
+    if config.max_output_tokens >= config.context_window_tokens:
+        raise CanvasGPTError(
+            "--max-output-tokens must be smaller than --context-window-tokens."
+        )
 
 
 def _run_chat(service: GraphService, node_id: str, message: str | None) -> None:

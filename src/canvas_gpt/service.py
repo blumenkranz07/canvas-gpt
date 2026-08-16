@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from .context import ContextBudget, ContextPlanner
 from .errors import CanvasGPTError, NodeNotFoundError, ProviderError
 from .models import Edge, Graph, Message, Node, utc_now
 from .providers import Provider
@@ -26,9 +27,15 @@ Use clear Markdown with concise sections appropriate to the material."""
 
 
 class GraphService:
-    def __init__(self, workspace: Workspace, provider: Provider | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        provider: Provider | None = None,
+        context_planner: ContextPlanner | None = None,
+    ) -> None:
         self.workspace = workspace
         self.provider = provider
+        self.context_planner = context_planner or ContextPlanner()
 
     def new_node(self, title: str) -> Node:
         title = self._clean_title(title)
@@ -54,9 +61,15 @@ class GraphService:
         graph = self.workspace.load_graph()
         node = self._get_node(graph, node_id)
         pending = [*self._context_messages(graph, node_id), Message(role="user", content=user_text)]
+        system_prompt = f"{CHAT_SYSTEM_PROMPT}\n\nCurrent node: {node.title}"
+        self.context_planner.require_fit(
+            pending,
+            system_prompt=system_prompt,
+            config=self.workspace.load_config(),
+        )
         response = provider.generate(
             pending,
-            system_prompt=f"{CHAT_SYSTEM_PROMPT}\n\nCurrent node: {node.title}",
+            system_prompt=system_prompt,
         )
         node.local_messages.extend(
             [Message(role="user", content=user_text), Message(role="assistant", content=response)]
@@ -159,6 +172,11 @@ class GraphService:
             + "\n\n# Selected source paths\n"
             + path_descriptions
         )
+        self.context_planner.require_fit(
+            [Message(role="user", content=request)],
+            system_prompt=MERGE_SYSTEM_PROMPT,
+            config=self.workspace.load_config(),
+        )
         response = provider.generate([Message(role="user", content=request)], system_prompt=MERGE_SYSTEM_PROMPT)
         node_title = self._clean_title(title or self._default_merge_title(sources))
         node = Node(
@@ -180,6 +198,19 @@ class GraphService:
         graph.edges.extend(Edge(source=source.id, target=node.id, type="merge") for source in sources)
         self.workspace.save_graph(graph)
         return node, response
+
+    def context_budget(self, node_id: str, user_text: str = "") -> ContextBudget:
+        """Return the projected chat budget for UI and diagnostic consumers."""
+        graph = self.workspace.load_graph()
+        node = self._get_node(graph, node_id)
+        messages = self._context_messages(graph, node_id)
+        if user_text:
+            messages.append(Message(role="user", content=user_text))
+        return self.context_planner.plan(
+            messages,
+            system_prompt=f"{CHAT_SYSTEM_PROMPT}\n\nCurrent node: {node.title}",
+            config=self.workspace.load_config(),
+        )
 
     def _context_messages(self, graph: Graph, node_id: str) -> list[Message]:
         messages: list[Message] = []

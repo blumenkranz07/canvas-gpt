@@ -6,6 +6,7 @@ from typing import Any
 
 
 CURRENT_GRAPH_VERSION = 2
+DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
 
 
 def utc_now() -> str:
@@ -157,6 +158,7 @@ class Config:
     provider: str = "openai"
     model: str = DEFAULT_MODELS["openai"]
     max_output_tokens: int = 2048
+    context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> Config:
@@ -164,6 +166,9 @@ class Config:
             provider=str(value.get("provider", "openai")),
             model=str(value.get("model", DEFAULT_MODELS["openai"])),
             max_output_tokens=int(value.get("max_output_tokens", 2048)),
+            context_window_tokens=int(
+                value.get("context_window_tokens", DEFAULT_CONTEXT_WINDOW_TOKENS)
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:

@@ -5,7 +5,12 @@ import unittest
 from pathlib import Path
 from collections.abc import Sequence
 
-from canvas_gpt.errors import CanvasGPTError, NodeNotFoundError, ProviderError
+from canvas_gpt.errors import (
+    CanvasGPTError,
+    ContextBudgetError,
+    NodeNotFoundError,
+    ProviderError,
+)
 from canvas_gpt.models import Config, Message
 from canvas_gpt.service import GraphService
 from canvas_gpt.storage import Workspace
@@ -85,6 +90,33 @@ class GraphServiceTests(unittest.TestCase):
 
         self.assertEqual(service.get_node(node.id).local_messages, [])
 
+    def test_chat_over_budget_fails_before_provider_and_does_not_modify_node(self) -> None:
+        self.workspace.save_config(
+            Config(max_output_tokens=100, context_window_tokens=500)
+        )
+        provider = FakeProvider()
+        service = GraphService(self.workspace, provider)
+        node = service.new_node("Budget guard")
+
+        with self.assertRaises(ContextBudgetError):
+            service.chat(node.id, "x" * 1_000)
+
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(service.get_node(node.id).local_messages, [])
+
+    def test_context_budget_projects_node_usage_for_ui_consumers(self) -> None:
+        provider = FakeProvider(["Answer"])
+        service = GraphService(self.workspace, provider)
+        node = service.new_node("Budget preview")
+        service.chat(node.id, "Question")
+
+        without_draft = service.context_budget(node.id)
+        with_draft = service.context_budget(node.id, "Next question")
+
+        self.assertTrue(without_draft.fits)
+        self.assertGreater(with_draft.estimated_input_tokens, without_draft.estimated_input_tokens)
+        self.assertGreater(with_draft.utilization, without_draft.utilization)
+
     def test_merge_requires_two_distinct_nodes(self) -> None:
         service = GraphService(self.workspace, FakeProvider())
         node = service.new_node("Only node")
@@ -132,6 +164,26 @@ class GraphServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "context length exceeded"):
             service.merge([first.id, second.id])
 
+        self.assertEqual(self.workspace.load_graph().to_dict(), before)
+
+    def test_merge_over_budget_fails_before_provider_and_graph_write(self) -> None:
+        self.workspace.save_config(
+            Config(max_output_tokens=100, context_window_tokens=500)
+        )
+        provider = FakeProvider()
+        service = GraphService(self.workspace, provider)
+        first = service.new_node("First")
+        second = service.new_node("Second")
+        graph = self.workspace.load_graph()
+        graph.nodes[first.id].local_messages.append(Message("user", "a" * 1_000))
+        graph.nodes[second.id].local_messages.append(Message("user", "b" * 1_000))
+        self.workspace.save_graph(graph)
+        before = self.workspace.load_graph().to_dict()
+
+        with self.assertRaises(ContextBudgetError):
+            service.merge([first.id, second.id])
+
+        self.assertEqual(provider.calls, [])
         self.assertEqual(self.workspace.load_graph().to_dict(), before)
 
     def test_connect_arbitrary_nodes(self) -> None:

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from canvas_gpt.errors import CanvasGPTError, NotInitializedError
-from canvas_gpt.models import Config
+from canvas_gpt.models import DEFAULT_CONTEXT_WINDOW_TOKENS, Config
 from canvas_gpt.service import GraphService
 from canvas_gpt.storage import Workspace
 
@@ -135,6 +135,25 @@ class WorkspaceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(CanvasGPTError, "Invalid config schema"):
                 workspace.load_config()
+
+    def test_legacy_config_without_context_window_uses_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(Path(directory))
+            workspace.initialize(Config())
+            workspace.config_path.write_text(
+                json.dumps(
+                    {
+                        "provider": "openai",
+                        "model": "legacy-model",
+                        "max_output_tokens": 999,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = workspace.load_config()
+
+            self.assertEqual(loaded.context_window_tokens, DEFAULT_CONTEXT_WINDOW_TOKENS)
 
     def test_initialize_refuses_to_overwrite_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
