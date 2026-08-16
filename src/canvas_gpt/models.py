@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-CURRENT_GRAPH_VERSION = 2
+CURRENT_GRAPH_VERSION = 3
+TITLE_SOURCES = ("manual", "placeholder", "auto")
 
 
 def utc_now() -> str:
@@ -26,6 +27,7 @@ class Message:
 class Node:
     id: str
     title: str
+    title_source: str = "manual"
     local_messages: list[Message] = field(default_factory=list)
     kind: str = "conversation"
     created_at: str = field(default_factory=utc_now)
@@ -34,9 +36,13 @@ class Node:
     @classmethod
     def from_dict(cls, value: dict[str, Any], *, legacy_messages: bool = False) -> Node:
         message_key = "messages" if legacy_messages else "local_messages"
+        title_source = str(value.get("title_source", "manual"))
+        if title_source not in TITLE_SOURCES:
+            raise ValueError(f"Unknown title source '{title_source}'.")
         return cls(
             id=str(value["id"]),
             title=str(value["title"]),
+            title_source=title_source,
             local_messages=[
                 Message.from_dict(item)
                 for item in value.get(message_key, value.get("messages", []))
@@ -50,6 +56,7 @@ class Node:
         return {
             "id": self.id,
             "title": self.title,
+            "title_source": self.title_source,
             "local_messages": [asdict(message) for message in self.local_messages],
             "kind": self.kind,
             "created_at": self.created_at,
@@ -93,7 +100,9 @@ class Graph:
             edges=[Edge.from_dict(edge) for edge in value.get("edges", [])],
         )
         if source_version < CURRENT_GRAPH_VERSION:
-            graph._migrate_v1_messages()
+            if source_version < 2:
+                graph._migrate_v1_messages()
+            graph.version = CURRENT_GRAPH_VERSION
         return graph
 
     def _migrate_v1_messages(self) -> None:
@@ -127,7 +136,7 @@ class Graph:
             else edge
             for edge in self.edges
         ]
-        self.version = CURRENT_GRAPH_VERSION
+        self.version = 2
 
     def to_dict(self) -> dict[str, Any]:
         return {

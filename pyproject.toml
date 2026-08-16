@@ -28,10 +28,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-cov>=5.0"]
+desktop = ["pywebview>=6.2,<7"]
 
 [project.scripts]
 canvas-gpt = "canvas_gpt.cli:entrypoint"
 cc = "canvas_gpt.cli:entrypoint"
+canvas-gpt-desktop = "canvas_gpt.desktop:entrypoint"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/canvas_gpt"]
@@ -39,4 +41,3 @@ packages = ["src/canvas_gpt"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
-

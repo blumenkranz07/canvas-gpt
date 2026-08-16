@@ -78,12 +78,46 @@ class GraphServiceTests(unittest.TestCase):
 
     def test_chat_failure_does_not_modify_node(self) -> None:
         service = GraphService(self.workspace, FailingProvider())
-        node = service.new_node("Safe write")
+        node = service.new_node("Untitled", title_source="placeholder")
 
         with self.assertRaises(ProviderError):
             service.chat(node.id, "This request fails")
 
         self.assertEqual(service.get_node(node.id).local_messages, [])
+        self.assertEqual(service.get_node(node.id).title, "Untitled")
+        self.assertEqual(service.get_node(node.id).title_source, "placeholder")
+
+    def test_placeholder_node_is_auto_titled_after_first_successful_chat(self) -> None:
+        service = GraphService(self.workspace, FakeProvider())
+        node = service.new_node("Untitled", title_source="placeholder")
+
+        service.chat(node.id, "比较 Tauri 和 pywebview 的优缺点。后面内容不应进入标题")
+
+        updated = service.get_node(node.id)
+        self.assertEqual(updated.title, "比较 Tauri 和 pywebview 的优缺…")
+        self.assertEqual(updated.title_source, "auto")
+
+    def test_renaming_node_marks_title_manual_and_prevents_auto_title(self) -> None:
+        service = GraphService(self.workspace, FakeProvider())
+        node = service.new_node("Untitled", title_source="placeholder")
+
+        renamed = service.rename_node(node.id, "Chosen title")
+        service.chat(node.id, "This would otherwise become the title")
+
+        self.assertEqual(renamed.title_source, "manual")
+        self.assertEqual(service.get_node(node.id).title, "Chosen title")
+        self.assertEqual(service.get_node(node.id).title_source, "manual")
+
+    def test_auto_title_is_cleaned_and_truncated_locally(self) -> None:
+        service = GraphService(self.workspace, FakeProvider())
+        node = service.new_node("New branch", title_source="placeholder")
+
+        service.chat(node.id, "# This is a deliberately long English title that should be truncated")
+
+        self.assertEqual(
+            service.get_node(node.id).title,
+            "This is a deliberately long English title that sho…",
+        )
 
     def test_merge_requires_two_distinct_nodes(self) -> None:
         service = GraphService(self.workspace, FakeProvider())
@@ -100,6 +134,10 @@ class GraphServiceTests(unittest.TestCase):
             service.new_node("   ")
         with self.assertRaisesRegex(CanvasGPTError, "Title cannot be empty"):
             service.branch(first.id, "   ")
+        with self.assertRaisesRegex(CanvasGPTError, "Title cannot be empty"):
+            service.rename_node(first.id, "   ")
+        with self.assertRaisesRegex(CanvasGPTError, "Unknown title source"):
+            service.new_node("Title", title_source="unknown")
         with self.assertRaisesRegex(CanvasGPTError, "Message cannot be empty"):
             service.chat(first.id, "   ")
         with self.assertRaisesRegex(CanvasGPTError, "instruction cannot be empty"):
@@ -115,6 +153,7 @@ class GraphServiceTests(unittest.TestCase):
             "context": lambda: service.context_messages("missing"),
             "chat": lambda: service.chat("missing", "Hello"),
             "branch": lambda: service.branch("missing", "Branch"),
+            "rename": lambda: service.rename_node("missing", "Renamed"),
             "connect source": lambda: service.connect("missing", existing.id, "reference"),
             "connect target": lambda: service.connect(existing.id, "missing", "reference"),
             "merge": lambda: service.merge([existing.id, "missing"]),
@@ -148,6 +187,44 @@ class GraphServiceTests(unittest.TestCase):
             service.connect(first.id, first.id, "reference")
         with self.assertRaises(CanvasGPTError):
             service.connect(first.id, second.id, "branch")
+
+    def test_empty_node_can_receive_and_replace_branch_parent(self) -> None:
+        service = GraphService(self.workspace, FakeProvider(["First answer", "Second answer"]))
+        first = service.new_node("First")
+        second = service.new_node("Second")
+        child = service.new_node("Untitled", title_source="placeholder")
+        service.chat(first.id, "First context")
+        service.chat(second.id, "Second context")
+
+        edge = service.set_branch_parent(child.id, first.id)
+        replacement = service.set_branch_parent(child.id, second.id)
+
+        self.assertEqual((edge.source, edge.target), (first.id, child.id))
+        self.assertEqual((replacement.source, replacement.target), (second.id, child.id))
+        graph = self.workspace.load_graph()
+        parent_edges = [
+            item for item in graph.edges if item.target == child.id and item.type == "branch"
+        ]
+        self.assertEqual(len(parent_edges), 1)
+        self.assertEqual(parent_edges[0].source, second.id)
+
+    def test_branch_parent_is_locked_after_conversation_starts(self) -> None:
+        service = GraphService(self.workspace, FakeProvider(["Parent answer", "Child answer"]))
+        parent = service.new_node("Parent")
+        child = service.new_node("Child")
+        service.chat(parent.id, "Parent context")
+        service.chat(child.id, "Child context")
+
+        with self.assertRaisesRegex(CanvasGPTError, "parent is locked"):
+            service.set_branch_parent(child.id, parent.id)
+
+    def test_cannot_branch_from_node_without_conversation(self) -> None:
+        service = GraphService(self.workspace)
+        parent = service.new_node("Empty parent")
+        child = service.new_node("Empty child")
+
+        with self.assertRaisesRegex(CanvasGPTError, "Start a conversation"):
+            service.set_branch_parent(child.id, parent.id)
 
     def test_branch_cycle_is_rejected_when_loading_context(self) -> None:
         from canvas_gpt.models import Edge

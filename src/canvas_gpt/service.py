@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 
 from .errors import CanvasGPTError, NodeNotFoundError, ProviderError
-from .models import Edge, Graph, Message, Node, utc_now
+from .models import Edge, Graph, Message, Node, TITLE_SOURCES, utc_now
 from .providers import Provider
 from .storage import Workspace
 
@@ -30,11 +31,25 @@ class GraphService:
         self.workspace = workspace
         self.provider = provider
 
-    def new_node(self, title: str) -> Node:
+    def new_node(self, title: str, *, title_source: str = "manual") -> Node:
         title = self._clean_title(title)
+        title_source = self._clean_title_source(title_source)
         graph = self.workspace.load_graph()
-        node = Node(id=self._next_id(graph), title=title)
+        node = Node(id=self._next_id(graph), title=title, title_source=title_source)
         graph.nodes[node.id] = node
+        self.workspace.save_graph(graph)
+        return node
+
+    def rename_node(
+        self, node_id: str, title: str, *, title_source: str = "manual"
+    ) -> Node:
+        title = self._clean_title(title)
+        title_source = self._clean_title_source(title_source)
+        graph = self.workspace.load_graph()
+        node = self._get_node(graph, node_id)
+        node.title = title
+        node.title_source = title_source
+        node.updated_at = utc_now()
         self.workspace.save_graph(graph)
         return node
 
@@ -58,6 +73,9 @@ class GraphService:
             pending,
             system_prompt=f"{CHAT_SYSTEM_PROMPT}\n\nCurrent node: {node.title}",
         )
+        if node.title_source == "placeholder" and not node.local_messages:
+            node.title = self._title_from_message(user_text)
+            node.title_source = "auto"
         node.local_messages.extend(
             [Message(role="user", content=user_text), Message(role="assistant", content=response)]
         )
@@ -65,14 +83,18 @@ class GraphService:
         self.workspace.save_graph(graph)
         return response
 
-    def branch(self, source_id: str, title: str) -> Node:
+    def branch(
+        self, source_id: str, title: str, *, title_source: str = "manual"
+    ) -> Node:
         title = self._clean_title(title)
+        title_source = self._clean_title_source(title_source)
         graph = self.workspace.load_graph()
         source = self._get_node(graph, source_id)
         context_message_count = len(self._context_messages(graph, source_id))
         node = Node(
             id=self._next_id(graph),
             title=title,
+            title_source=title_source,
             kind="conversation",
         )
         graph.nodes[node.id] = node
@@ -86,6 +108,45 @@ class GraphService:
         )
         self.workspace.save_graph(graph)
         return node
+
+    def set_branch_parent(self, child_id: str, parent_id: str) -> Edge:
+        if child_id == parent_id:
+            raise CanvasGPTError("A node cannot be its own parent.")
+        graph = self.workspace.load_graph()
+        child = self._get_node(graph, child_id)
+        self._get_node(graph, parent_id)
+        if child.kind != "conversation" or child.local_messages:
+            raise CanvasGPTError(
+                "This node has started a conversation, so its parent is locked."
+            )
+        if any(
+            edge.source == child_id and edge.type in STRUCTURAL_EDGE_TYPES
+            for edge in graph.edges
+        ):
+            raise CanvasGPTError(
+                "This node already has structural children, so its parent is locked."
+            )
+        if any(
+            edge.target == child_id and edge.type == "merge" for edge in graph.edges
+        ):
+            raise CanvasGPTError("Merge nodes cannot be assigned a branch parent.")
+        parent_context_count = len(self._context_messages(graph, parent_id))
+        if parent_context_count == 0:
+            raise CanvasGPTError("Start a conversation before branching from this node.")
+        graph.edges = [
+            edge
+            for edge in graph.edges
+            if not (edge.target == child_id and edge.type == "branch")
+        ]
+        edge = Edge(
+            source=parent_id,
+            target=child_id,
+            type="branch",
+            context_message_count=parent_context_count,
+        )
+        graph.edges.append(edge)
+        self.workspace.save_graph(graph)
+        return edge
 
     def connect(self, source_id: str, target_id: str, edge_type: str) -> Edge:
         if edge_type not in CONNECT_EDGE_TYPES:
@@ -164,6 +225,7 @@ class GraphService:
         node = Node(
             id=self._next_id(graph),
             title=node_title,
+            title_source="manual" if title is not None else "auto",
             kind="merge",
             local_messages=[
                 Message(
@@ -265,6 +327,27 @@ class GraphService:
         if not title:
             raise CanvasGPTError("Title cannot be empty.")
         return title
+
+    @staticmethod
+    def _clean_title_source(title_source: str) -> str:
+        if title_source not in TITLE_SOURCES:
+            raise CanvasGPTError(
+                f"Unknown title source '{title_source}'. Choose from: "
+                f"{', '.join(TITLE_SOURCES)}."
+            )
+        return title_source
+
+    @staticmethod
+    def _title_from_message(message: str) -> str:
+        first_line = next((line.strip() for line in message.splitlines() if line.strip()), "")
+        title = re.sub(r"^(?:#{1,6}\s+|[-*+]\s+|>\s*)", "", first_line).strip()
+        title = re.split(r"[。！？!?]", title, maxsplit=1)[0].strip()
+        title = re.sub(r"\s+", " ", title)
+        if not title:
+            return "New conversation"
+        has_cjk = bool(re.search(r"[\u3400-\u9fff]", title))
+        limit = 24 if has_cjk else 50
+        return f"{title[:limit].rstrip()}…" if len(title) > limit else title
 
     @staticmethod
     def _default_merge_title(sources: list[Node]) -> str:

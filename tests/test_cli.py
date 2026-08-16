@@ -47,6 +47,10 @@ class CLITests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("Created n2 from n1", output)
 
+            code, output, _ = self.run_cli(root, "rename", "n2", "Alternative path")
+            self.assertEqual(code, 0)
+            self.assertIn("Renamed n2: Alternative path", output)
+
             code, output, _ = self.run_cli(root, "merge", "n1", "n2")
             self.assertEqual(code, 0)
             self.assertIn("Created merge node n3", output)

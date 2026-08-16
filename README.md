@@ -66,6 +66,7 @@ The short `cc` command is equivalent to `canvas-gpt`:
 cc new "Design the context model"
 cc chat n1 "What should a node store?"
 cc branch n1 "Alternative: immutable nodes"
+cc rename n2 "Immutable-node alternative"
 cc chat n2 "Explore the tradeoffs"
 cc merge n1 n2 --title "Canonical node design"
 cc graph
@@ -79,6 +80,25 @@ cc chat n1
 
 Type `/exit` or `/quit` to leave it.
 
+## Desktop canvas
+
+The desktop prototype keeps the canvas available without an API key; chat is disabled until the
+configured provider key is present in the environment.
+
+```powershell
+python -m pip install -e ".[dev,desktop]"
+npm --prefix ui install
+npm --prefix ui run build
+canvas-gpt-desktop --root .
+```
+
+For frontend development, run Vite and point the desktop shell at it:
+
+```powershell
+npm --prefix ui run dev
+canvas-gpt-desktop --root . --dev-url http://localhost:5173 --debug
+```
+
 ## Commands
 
 ```text
@@ -86,6 +106,7 @@ canvas-gpt init [--provider openai|anthropic] [--model MODEL]
 canvas-gpt new "TITLE"
 canvas-gpt chat NODE_ID ["MESSAGE"]
 canvas-gpt branch SOURCE_ID "TITLE"
+canvas-gpt rename NODE_ID "TITLE"
 canvas-gpt merge NODE_ID NODE_ID [NODE_ID ...] [--title TITLE]
 canvas-gpt connect SOURCE_ID TARGET_ID --type supports
 canvas-gpt graph
@@ -111,8 +132,9 @@ Running `init` creates:
 
 This directory is ignored by Git. `config.json` contains only the provider, model ID, and output
 token limit. Credentials are never written into it.
-`graph.json` uses schema version 2: each node stores only `local_messages`, while a branch edge
-records the exact inherited message boundary. Version 1 graphs are migrated automatically.
+`graph.json` uses schema version 3: each node stores only `local_messages` and records whether its
+title is manual, a UI placeholder, or automatic, while a branch edge records the exact inherited
+message boundary. Version 1 and 2 graphs are migrated automatically.
 
 Defaults:
 

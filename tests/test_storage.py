@@ -26,6 +26,11 @@ class WorkspaceTests(unittest.TestCase):
             self.assertNotIn("api_key", raw.lower())
             self.assertEqual(json.loads(raw)["provider"], "anthropic")
 
+            workspace.save_ui_state(
+                {"positions": {"n1": {"x": 12, "y": 24}}, "split_ratio": 0.64}
+            )
+            self.assertEqual(workspace.load_ui_state()["split_ratio"], 0.64)
+
     def test_v1_graph_migrates_copied_branch_history_to_local_messages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(Path(directory))
@@ -59,7 +64,7 @@ class WorkspaceTests(unittest.TestCase):
 
             graph = workspace.load_graph()
 
-            self.assertEqual(graph.version, 2)
+            self.assertEqual(graph.version, 3)
             self.assertEqual(
                 [message.content for message in graph.nodes["n2"].local_messages],
                 ["Branch continuation", "Branch answer"],
@@ -78,9 +83,39 @@ class WorkspaceTests(unittest.TestCase):
                 ],
             )
             migrated_raw = json.loads(workspace.graph_path.read_text(encoding="utf-8"))
-            self.assertEqual(migrated_raw["version"], 2)
+            self.assertEqual(migrated_raw["version"], 3)
             self.assertIn("local_messages", migrated_raw["nodes"]["n2"])
             self.assertNotIn("messages", migrated_raw["nodes"]["n2"])
+            self.assertEqual(migrated_raw["nodes"]["n1"]["title_source"], "manual")
+
+    def test_v2_graph_adds_manual_title_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(Path(directory))
+            workspace.initialize(Config())
+            workspace.graph_path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "nodes": {
+                            "n1": {
+                                "id": "n1",
+                                "title": "Existing title",
+                                "local_messages": [],
+                            }
+                        },
+                        "edges": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            graph = workspace.load_graph()
+
+            self.assertEqual(graph.version, 3)
+            self.assertEqual(graph.nodes["n1"].title_source, "manual")
+            migrated_raw = json.loads(workspace.graph_path.read_text(encoding="utf-8"))
+            self.assertEqual(migrated_raw["version"], 3)
+            self.assertEqual(migrated_raw["nodes"]["n1"]["title_source"], "manual")
 
     def test_uninitialized_workspace_raises_clean_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -98,6 +133,23 @@ class WorkspaceTests(unittest.TestCase):
                     {
                         "version": 2,
                         "nodes": {"n1": {"id": "n1", "local_messages": []}},
+                        "edges": [],
+                    }
+                ),
+                "Invalid graph schema",
+            ),
+            (
+                json.dumps(
+                    {
+                        "version": 3,
+                        "nodes": {
+                            "n1": {
+                                "id": "n1",
+                                "title": "Broken",
+                                "title_source": "unknown",
+                                "local_messages": [],
+                            }
+                        },
                         "edges": [],
                     }
                 ),

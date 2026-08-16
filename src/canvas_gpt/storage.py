@@ -16,6 +16,7 @@ class Workspace:
         self.data_dir = self.root / ".canvas-gpt"
         self.config_path = self.data_dir / "config.json"
         self.graph_path = self.data_dir / "graph.json"
+        self.ui_path = self.data_dir / "ui.json"
 
     @property
     def initialized(self) -> bool:
@@ -73,6 +74,16 @@ class Workspace:
     def save_graph(self, graph: Graph) -> None:
         self.require_initialized()
         self._write_json(self.graph_path, graph.to_dict())
+
+    def load_ui_state(self) -> dict[str, Any]:
+        self.require_initialized()
+        if not self.ui_path.is_file():
+            return {}
+        return self._read_json(self.ui_path)
+
+    def save_ui_state(self, state: dict[str, Any]) -> None:
+        self.require_initialized()
+        self._write_json(self.ui_path, state)
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:

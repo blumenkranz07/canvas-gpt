@@ -41,6 +41,10 @@ def build_parser() -> argparse.ArgumentParser:
     branch_parser.add_argument("source_id")
     branch_parser.add_argument("title")
 
+    rename_parser = commands.add_parser("rename", help="Rename a conversation node.")
+    rename_parser.add_argument("node_id")
+    rename_parser.add_argument("title")
+
     merge_parser = commands.add_parser("merge", help="Synthesize any two or more nodes.")
     merge_parser.add_argument("source_ids", nargs="+")
     merge_parser.add_argument("--title")
@@ -87,6 +91,9 @@ def main(
         elif args.command == "branch":
             node = service.branch(args.source_id, args.title)
             print(f"Created {node.id} from {args.source_id}: {node.title}")
+        elif args.command == "rename":
+            node = service.rename_node(args.node_id, args.title)
+            print(f"Renamed {node.id}: {node.title}")
         elif args.command == "connect":
             edge = service.connect(args.source_id, args.target_id, args.edge_type)
             print(f"Connected {edge.source} --{edge.type}--> {edge.target}")
