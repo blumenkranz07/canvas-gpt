@@ -36,15 +36,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         entrypoint = str(index_path)
 
-    webview.create_window(
+    api = DesktopAPI(args.root)
+    window = webview.create_window(
         "Canvas GPT",
         url=entrypoint,
-        js_api=DesktopAPI(args.root),
+        js_api=api,
         width=1360,
         height=840,
         min_size=(900, 600),
+        frameless=True,
+        easy_drag=False,
+        shadow=True,
         background_color="#f4f5f7",
     )
+    api._attach_window(window)
     webview.start(debug=args.debug, http_server=use_local_server)
     return 0
 

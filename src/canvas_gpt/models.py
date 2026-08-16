@@ -70,15 +70,22 @@ class Edge:
     target: str
     type: str
     context_message_count: int | None = None
+    context_path: tuple[tuple[str, int], ...] | None = None
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> Edge:
         raw_count = value.get("context_message_count")
+        raw_path = value.get("context_path")
         return cls(
             source=str(value["source"]),
             target=str(value["target"]),
             type=str(value["type"]),
             context_message_count=int(raw_count) if raw_count is not None else None,
+            context_path=(
+                tuple((str(node_id), int(message_count)) for node_id, message_count in raw_path)
+                if raw_path is not None
+                else None
+            ),
         )
 
 

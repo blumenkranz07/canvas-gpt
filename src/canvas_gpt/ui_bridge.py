@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
@@ -9,7 +10,7 @@ from typing import Any, TypeVar
 from .errors import CanvasGPTError
 from .models import Config, Graph
 from .providers import build_provider
-from .service import GraphService
+from .service import GraphService, STRUCTURAL_EDGE_TYPES
 from .storage import Workspace
 
 
@@ -23,6 +24,63 @@ API_KEY_ENVIRONMENTS = {
 class DesktopAPI:
     def __init__(self, root: Path | str) -> None:
         self.workspace = Workspace(root)
+        self._window: Any | None = None
+        self._window_is_maximized = False
+
+    def _attach_window(self, window: Any) -> None:
+        self._window = window
+
+        def maximized(*_: Any) -> None:
+            self._window_is_maximized = True
+
+        def restored(*_: Any) -> None:
+            self._window_is_maximized = False
+
+        window.events.maximized += maximized
+        window.events.restored += restored
+
+    def minimize_window(self) -> dict[str, Any]:
+        return self._result(lambda: self._run_window_action("minimize"))
+
+    def toggle_maximize_window(self) -> dict[str, Any]:
+        def toggle() -> bool:
+            if self._window is None:
+                raise CanvasGPTError("Desktop window is not ready.")
+            if self._window_is_maximized:
+                self._window.restore()
+                self._window_is_maximized = False
+            else:
+                self._window.maximize()
+                self._window_is_maximized = True
+            return self._window_is_maximized
+
+        return self._result(toggle)
+
+    def close_window(self) -> dict[str, Any]:
+        return self._result(lambda: self._run_window_action("destroy"))
+
+    def resize_window(self, width: float, height: float, anchor: str) -> dict[str, Any]:
+        def resize() -> bool:
+            if self._window is None:
+                raise CanvasGPTError("Desktop window is not ready.")
+            from webview.window import FixPoint
+
+            fix_points = {
+                "north-west": FixPoint.NORTH | FixPoint.WEST,
+                "north-east": FixPoint.NORTH | FixPoint.EAST,
+                "south-west": FixPoint.SOUTH | FixPoint.WEST,
+                "south-east": FixPoint.SOUTH | FixPoint.EAST,
+            }
+            if anchor not in fix_points:
+                raise CanvasGPTError("Invalid window resize anchor.")
+            self._window.resize(
+                max(900, int(width)),
+                max(600, int(height)),
+                fix_points[anchor],
+            )
+            return True
+
+        return self._result(resize)
 
     def bootstrap(self) -> dict[str, Any]:
         return self._result(self._snapshot)
@@ -65,14 +123,25 @@ class DesktopAPI:
     def set_branch_parent(self, child_id: str, parent_id: str) -> dict[str, Any]:
         def set_parent() -> dict[str, Any]:
             edge = GraphService(self.workspace).set_branch_parent(child_id, parent_id)
-            return {
-                "source": edge.source,
-                "target": edge.target,
-                "type": edge.type,
-                "context_message_count": edge.context_message_count,
-            }
+            return self._edge_payload(edge)
 
         return self._result(set_parent)
+
+    def add_draft_parent(self, child_id: str, parent_id: str) -> dict[str, Any]:
+        def add_parent() -> dict[str, Any]:
+            edge = GraphService(self.workspace).add_draft_parent(child_id, parent_id)
+            return self._edge_payload(edge)
+
+        return self._result(add_parent)
+
+    def remove_draft_parent(self, child_id: str, parent_id: str) -> dict[str, Any]:
+        def remove_parent() -> dict[str, Any]:
+            remaining = GraphService(self.workspace).remove_draft_parent(
+                child_id, parent_id
+            )
+            return {"parent_ids": [edge.source for edge in remaining]}
+
+        return self._result(remove_parent)
 
     def rename_node(self, node_id: str, title: str) -> dict[str, Any]:
         return self._result(
@@ -134,6 +203,7 @@ class DesktopAPI:
             return {
                 "initialized": False,
                 "workspace_name": self.workspace.root.name,
+                "platform": self._platform_name(),
             }
         graph = self.workspace.load_graph()
         config = self.workspace.load_config()
@@ -142,6 +212,7 @@ class DesktopAPI:
         return {
             "initialized": True,
             "workspace_name": self.workspace.root.name,
+            "platform": self._platform_name(),
             "config": {
                 "provider": config.provider,
                 "model": config.model,
@@ -152,6 +223,12 @@ class DesktopAPI:
                 {
                     **self._node_payload(node),
                     "message_count": len(service.context_messages(node.id)),
+                    "parent_ids": [
+                        edge.source
+                        for edge in graph.edges
+                        if edge.target == node.id
+                        and edge.type in STRUCTURAL_EDGE_TYPES
+                    ],
                 }
                 for node in sorted(graph.nodes.values(), key=self._node_sort_key)
             ],
@@ -180,10 +257,33 @@ class DesktopAPI:
         }
 
     @staticmethod
+    def _edge_payload(edge: Any) -> dict[str, Any]:
+        return {
+            "source": edge.source,
+            "target": edge.target,
+            "type": edge.type,
+            "context_message_count": edge.context_message_count,
+        }
+
+    @staticmethod
     def _node_sort_key(node: Any) -> tuple[int, str]:
         if node.id.startswith("n") and node.id[1:].isdigit():
             return (int(node.id[1:]), node.id)
         return (10**9, node.id)
+
+    def _run_window_action(self, action: str) -> bool:
+        if self._window is None:
+            raise CanvasGPTError("Desktop window is not ready.")
+        getattr(self._window, action)()
+        return True
+
+    @staticmethod
+    def _platform_name() -> str:
+        if sys.platform == "darwin":
+            return "macos"
+        if sys.platform == "win32":
+            return "windows"
+        return "linux"
 
     @staticmethod
     def _result(action: Callable[[], T]) -> dict[str, Any]:

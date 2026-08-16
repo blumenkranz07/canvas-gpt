@@ -7,6 +7,7 @@ export interface NodeRecord {
   kind: string;
   local_message_count: number;
   message_count: number;
+  parent_ids?: string[];
   created_at: string;
   updated_at: string;
 }
@@ -38,6 +39,7 @@ export interface UiState {
 export interface Snapshot {
   initialized: boolean;
   workspace_name: string;
+  platform?: 'windows' | 'macos' | 'linux';
   config?: ConfigStatus;
   nodes?: NodeRecord[];
   edges?: EdgeRecord[];

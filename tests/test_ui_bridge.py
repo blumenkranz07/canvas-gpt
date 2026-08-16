@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -78,6 +79,33 @@ class DesktopAPITests(unittest.TestCase):
         self.assertTrue(saved["ok"])
         self.assertEqual(saved["data"]["split_ratio"], 0.61)
 
+    def test_snapshot_and_bridge_support_multiple_draft_parents(self) -> None:
+        self.api.initialize_workspace()
+        first = self.api.create_node()["data"]
+        second = self.api.create_node()["data"]
+        child = self.api.create_node()["data"]
+
+        first_connection = self.api.add_draft_parent(child["id"], first["id"])
+        second_connection = self.api.add_draft_parent(child["id"], second["id"])
+
+        self.assertTrue(first_connection["ok"])
+        self.assertEqual(first_connection["data"]["type"], "branch")
+        self.assertTrue(second_connection["ok"])
+        self.assertEqual(second_connection["data"]["type"], "merge")
+        snapshot = self.api.bootstrap()["data"]
+        child_record = next(node for node in snapshot["nodes"] if node["id"] == child["id"])
+        self.assertEqual(child_record["parent_ids"], [first["id"], second["id"]])
+        incoming = [edge for edge in snapshot["edges"] if edge["target"] == child["id"]]
+        self.assertEqual({edge["type"] for edge in incoming}, {"merge"})
+
+        removed = self.api.remove_draft_parent(child["id"], first["id"])
+        self.assertTrue(removed["ok"])
+        self.assertEqual(removed["data"]["parent_ids"], [second["id"]])
+        snapshot = self.api.bootstrap()["data"]
+        incoming = [edge for edge in snapshot["edges"] if edge["target"] == child["id"]]
+        self.assertEqual(len(incoming), 1)
+        self.assertEqual(incoming[0]["type"], "branch")
+
     def test_new_graph_clears_nodes_but_preserves_config(self) -> None:
         self.api.initialize_workspace()
         self.api.create_node()
@@ -87,6 +115,44 @@ class DesktopAPITests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["data"]["nodes"], [])
         self.assertEqual(result["data"]["config"]["provider"], "openai")
+
+    def test_window_controls_are_exposed_through_bridge(self) -> None:
+        class EventHook:
+            def __iadd__(self, callback):
+                return self
+
+        class FakeWindow:
+            def __init__(self) -> None:
+                self.events = SimpleNamespace(maximized=EventHook(), restored=EventHook())
+                self.actions: list[str] = []
+
+            def minimize(self) -> None:
+                self.actions.append("minimize")
+
+            def maximize(self) -> None:
+                self.actions.append("maximize")
+
+            def restore(self) -> None:
+                self.actions.append("restore")
+
+            def destroy(self) -> None:
+                self.actions.append("destroy")
+
+            def resize(self, width, height, fix_point) -> None:
+                self.actions.append(f"resize:{width}x{height}")
+
+        window = FakeWindow()
+        self.api._attach_window(window)
+
+        self.assertTrue(self.api.minimize_window()["ok"])
+        self.assertTrue(self.api.toggle_maximize_window()["data"])
+        self.assertFalse(self.api.toggle_maximize_window()["data"])
+        self.assertTrue(self.api.close_window()["ok"])
+        self.assertTrue(self.api.resize_window(1000, 700, "north-west")["ok"])
+        self.assertEqual(
+            window.actions,
+            ["minimize", "maximize", "restore", "destroy", "resize:1000x700"],
+        )
 
 
 if __name__ == "__main__":

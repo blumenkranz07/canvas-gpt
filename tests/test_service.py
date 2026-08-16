@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 from canvas_gpt.errors import CanvasGPTError, NodeNotFoundError, ProviderError
 from canvas_gpt.models import Config, Message
-from canvas_gpt.service import GraphService
+from canvas_gpt.service import GraphService, MAX_DRAFT_PARENTS
 from canvas_gpt.storage import Workspace
 
 
@@ -208,6 +208,144 @@ class GraphServiceTests(unittest.TestCase):
         self.assertEqual(len(parent_edges), 1)
         self.assertEqual(parent_edges[0].source, second.id)
 
+    def test_draft_accepts_multiple_parents_and_normalizes_edge_types(self) -> None:
+        service = GraphService(self.workspace)
+        parents = [service.new_node(f"Parent {index}") for index in range(3)]
+        child = service.new_node("Draft")
+
+        first_edge = service.add_draft_parent(child.id, parents[0].id)
+        second_edge = service.add_draft_parent(child.id, parents[1].id)
+        third_edge = service.add_draft_parent(child.id, parents[2].id)
+
+        self.assertEqual(first_edge.type, "branch")
+        self.assertEqual(second_edge.type, "merge")
+        self.assertEqual(third_edge.type, "merge")
+        graph = self.workspace.load_graph()
+        incoming = [edge for edge in graph.edges if edge.target == child.id]
+        self.assertEqual([edge.source for edge in incoming], [node.id for node in parents])
+        self.assertEqual({edge.type for edge in incoming}, {"merge"})
+        self.assertTrue(all(edge.context_path == () for edge in incoming))
+
+    def test_removing_draft_parents_restores_branch_then_plain_draft(self) -> None:
+        service = GraphService(self.workspace)
+        parents = [service.new_node(f"Parent {index}") for index in range(3)]
+        child = service.new_node("Draft")
+        for parent in parents:
+            service.add_draft_parent(child.id, parent.id)
+
+        remaining = service.remove_draft_parent(child.id, parents[1].id)
+        self.assertEqual(len(remaining), 2)
+        self.assertEqual({edge.type for edge in remaining}, {"merge"})
+
+        remaining = service.remove_draft_parent(child.id, parents[2].id)
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0].type, "branch")
+
+        remaining = service.remove_draft_parent(child.id, parents[0].id)
+        self.assertEqual(remaining, [])
+
+    def test_draft_parent_validation_rejects_duplicate_cycle_and_limit(self) -> None:
+        service = GraphService(self.workspace)
+        parents = [
+            service.new_node(f"Parent {index}")
+            for index in range(MAX_DRAFT_PARENTS + 1)
+        ]
+        child = service.new_node("Draft")
+        service.add_draft_parent(child.id, parents[0].id)
+
+        with self.assertRaisesRegex(CanvasGPTError, "already a parent"):
+            service.add_draft_parent(child.id, parents[0].id)
+        with self.assertRaisesRegex(CanvasGPTError, "cycle"):
+            service.add_draft_parent(parents[0].id, child.id)
+
+        for parent in parents[1:MAX_DRAFT_PARENTS]:
+            service.add_draft_parent(child.id, parent.id)
+        with self.assertRaisesRegex(CanvasGPTError, "at most 8"):
+            service.add_draft_parent(child.id, parents[-1].id)
+
+    def test_first_message_commits_merge_draft_without_mutating_parents(self) -> None:
+        provider = FakeProvider(["Merged answer"])
+        service = GraphService(self.workspace, provider)
+        first = service.new_node("First")
+        second = service.new_node("Second")
+        child = service.new_node("Untitled", title_source="placeholder")
+        graph = self.workspace.load_graph()
+        graph.nodes[first.id].local_messages = [
+            Message(role="user", content="Frozen first context")
+        ]
+        graph.nodes[second.id].local_messages = [
+            Message(role="user", content="Frozen second context")
+        ]
+        self.workspace.save_graph(graph)
+        service.add_draft_parent(child.id, first.id)
+        service.add_draft_parent(child.id, second.id)
+
+        graph = self.workspace.load_graph()
+        graph.nodes[first.id].local_messages.append(
+            Message(role="user", content="Late parent change")
+        )
+        self.workspace.save_graph(graph)
+        parents_before = {
+            node_id: list(self.workspace.load_graph().nodes[node_id].local_messages)
+            for node_id in (first.id, second.id)
+        }
+
+        response = service.chat(child.id, "Keep agreements and surface conflicts")
+
+        self.assertEqual(response, "Merged answer")
+        prompt = provider.calls[0][0][0].content
+        self.assertIn("Frozen first context", prompt)
+        self.assertIn("Frozen second context", prompt)
+        self.assertNotIn("Late parent change", prompt)
+        updated = service.get_node(child.id)
+        self.assertEqual(updated.kind, "merge")
+        self.assertEqual(updated.title, "Merge: First + Second")
+        self.assertIn("Goal: Keep agreements and surface conflicts", updated.local_messages[0].content)
+        graph = self.workspace.load_graph()
+        self.assertEqual(
+            {node_id: graph.nodes[node_id].local_messages for node_id in parents_before},
+            parents_before,
+        )
+        with self.assertRaisesRegex(CanvasGPTError, "parents are locked"):
+            service.remove_draft_parent(child.id, first.id)
+
+    def test_failed_merge_draft_commit_preserves_node_and_wiring(self) -> None:
+        service = GraphService(self.workspace, FailingProvider())
+        first = service.new_node("First")
+        second = service.new_node("Second")
+        child = service.new_node("Draft")
+        service.add_draft_parent(child.id, first.id)
+        service.add_draft_parent(child.id, second.id)
+        before = self.workspace.load_graph().to_dict()
+
+        with self.assertRaisesRegex(ProviderError, "simulated failure"):
+            service.chat(child.id, "Merge these")
+
+        self.assertEqual(self.workspace.load_graph().to_dict(), before)
+
+    def test_adding_parent_to_draft_does_not_rewrite_existing_child_context(self) -> None:
+        service = GraphService(self.workspace)
+        first = service.new_node("First")
+        second = service.new_node("Second")
+        draft = service.new_node("Draft")
+        graph = self.workspace.load_graph()
+        graph.nodes[first.id].local_messages = [
+            Message(role="user", content="Original inherited context")
+        ]
+        graph.nodes[second.id].local_messages = [
+            Message(role="user", content="New merge context")
+        ]
+        self.workspace.save_graph(graph)
+        service.add_draft_parent(draft.id, first.id)
+        descendant = service.branch(draft.id, "Existing child")
+
+        service.add_draft_parent(draft.id, second.id)
+
+        self.assertEqual(
+            [message.content for message in service.context_messages(descendant.id)],
+            ["Original inherited context"],
+        )
+
     def test_branch_parent_is_locked_after_conversation_starts(self) -> None:
         service = GraphService(self.workspace, FakeProvider(["Parent answer", "Child answer"]))
         parent = service.new_node("Parent")
@@ -218,13 +356,15 @@ class GraphServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(CanvasGPTError, "parent is locked"):
             service.set_branch_parent(child.id, parent.id)
 
-    def test_cannot_branch_from_node_without_conversation(self) -> None:
+    def test_empty_node_can_be_a_branch_parent_with_zero_context(self) -> None:
         service = GraphService(self.workspace)
         parent = service.new_node("Empty parent")
         child = service.new_node("Empty child")
 
-        with self.assertRaisesRegex(CanvasGPTError, "Start a conversation"):
-            service.set_branch_parent(child.id, parent.id)
+        edge = service.set_branch_parent(child.id, parent.id)
+
+        self.assertEqual(edge.context_message_count, 0)
+        self.assertEqual(service.context_messages(child.id), [])
 
     def test_branch_cycle_is_rejected_when_loading_context(self) -> None:
         from canvas_gpt.models import Edge

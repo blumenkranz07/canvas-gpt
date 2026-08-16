@@ -99,6 +99,16 @@ npm --prefix ui run dev
 canvas-gpt-desktop --root . --dev-url http://localhost:5173 --debug
 ```
 
+Build a Windows x64 desktop bundle and zip archive:
+
+```powershell
+python -m pip install -e ".[desktop,build]"
+.\scripts\build_windows.ps1
+```
+
+The executable is written to `dist\CanvasGPT\CanvasGPT.exe`, and the portable archive is
+`dist\CanvasGPT-windows-x64.zip`.
+
 ## Commands
 
 ```text

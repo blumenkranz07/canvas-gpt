@@ -12,6 +12,7 @@ from .storage import Workspace
 STRUCTURAL_EDGE_TYPES = ("branch", "merge")
 CONNECT_EDGE_TYPES = ("supports", "contradicts", "extends", "reference")
 EDGE_TYPES = STRUCTURAL_EDGE_TYPES + CONNECT_EDGE_TYPES
+MAX_DRAFT_PARENTS = 8
 
 CHAT_SYSTEM_PROMPT = """You are the AI collaborator inside Canvas GPT, a graph-shaped conversation workspace.
 Stay focused on the current node's topic. Preserve useful decisions and assumptions from the
@@ -68,6 +69,15 @@ class GraphService:
         provider = self._require_provider()
         graph = self.workspace.load_graph()
         node = self._get_node(graph, node_id)
+        parent_edges = self._structural_parent_edges(graph, node_id)
+        if (
+            node.kind == "conversation"
+            and not node.local_messages
+            and len(parent_edges) >= 2
+        ):
+            return self._commit_merge_draft(
+                graph, node, parent_edges, user_text, provider
+            )
         pending = [*self._context_messages(graph, node_id), Message(role="user", content=user_text)]
         response = provider.generate(
             pending,
@@ -104,6 +114,7 @@ class GraphService:
                 target=node.id,
                 type="branch",
                 context_message_count=context_message_count,
+                context_path=self._snapshot_context_path(graph, source.id),
             )
         )
         self.workspace.save_graph(graph)
@@ -120,19 +131,13 @@ class GraphService:
                 "This node has started a conversation, so its parent is locked."
             )
         if any(
-            edge.source == child_id and edge.type in STRUCTURAL_EDGE_TYPES
-            for edge in graph.edges
-        ):
-            raise CanvasGPTError(
-                "This node already has structural children, so its parent is locked."
-            )
-        if any(
             edge.target == child_id and edge.type == "merge" for edge in graph.edges
         ):
             raise CanvasGPTError("Merge nodes cannot be assigned a branch parent.")
+        if self._has_structural_path(graph, child_id, parent_id):
+            raise CanvasGPTError("That parent would create a cycle in the graph.")
+        self._freeze_outgoing_context_snapshots(graph, child_id)
         parent_context_count = len(self._context_messages(graph, parent_id))
-        if parent_context_count == 0:
-            raise CanvasGPTError("Start a conversation before branching from this node.")
         graph.edges = [
             edge
             for edge in graph.edges
@@ -143,10 +148,86 @@ class GraphService:
             target=child_id,
             type="branch",
             context_message_count=parent_context_count,
+            context_path=self._snapshot_context_path(graph, parent_id),
         )
         graph.edges.append(edge)
         self.workspace.save_graph(graph)
         return edge
+
+    def add_draft_parent(self, child_id: str, parent_id: str) -> Edge:
+        if child_id == parent_id:
+            raise CanvasGPTError("A node cannot be its own parent.")
+        graph = self.workspace.load_graph()
+        child = self._get_node(graph, child_id)
+        self._get_node(graph, parent_id)
+        if child.kind != "conversation" or child.local_messages:
+            raise CanvasGPTError(
+                "This node has started a conversation, so its parents are locked."
+            )
+        parent_edges = self._structural_parent_edges(graph, child_id)
+        if any(edge.source == parent_id for edge in parent_edges):
+            raise CanvasGPTError("That node is already a parent of this Draft.")
+        if len(parent_edges) >= MAX_DRAFT_PARENTS:
+            raise CanvasGPTError(
+                f"A Draft can have at most {MAX_DRAFT_PARENTS} parents."
+            )
+        if self._has_structural_path(graph, child_id, parent_id):
+            raise CanvasGPTError("That parent would create a cycle in the graph.")
+
+        self._freeze_outgoing_context_snapshots(graph, child_id)
+        context_path = self._snapshot_context_path(graph, parent_id)
+        context_message_count = sum(count for _, count in context_path)
+        new_type = "branch" if not parent_edges else "merge"
+        if parent_edges:
+            graph.edges = [
+                self._with_edge_type(edge, "merge")
+                if edge.target == child_id and edge.type in STRUCTURAL_EDGE_TYPES
+                else edge
+                for edge in graph.edges
+            ]
+        edge = Edge(
+            source=parent_id,
+            target=child_id,
+            type=new_type,
+            context_message_count=context_message_count,
+            context_path=context_path,
+        )
+        graph.edges.append(edge)
+        self.workspace.save_graph(graph)
+        return edge
+
+    def remove_draft_parent(self, child_id: str, parent_id: str) -> list[Edge]:
+        graph = self.workspace.load_graph()
+        child = self._get_node(graph, child_id)
+        self._get_node(graph, parent_id)
+        if child.kind != "conversation" or child.local_messages:
+            raise CanvasGPTError(
+                "This node has started a conversation, so its parents are locked."
+            )
+        parent_edges = self._structural_parent_edges(graph, child_id)
+        if not any(edge.source == parent_id for edge in parent_edges):
+            raise CanvasGPTError("That node is not a parent of this Draft.")
+
+        self._freeze_outgoing_context_snapshots(graph, child_id)
+        graph.edges = [
+            edge
+            for edge in graph.edges
+            if not (
+                edge.source == parent_id
+                and edge.target == child_id
+                and edge.type in STRUCTURAL_EDGE_TYPES
+            )
+        ]
+        remaining = self._structural_parent_edges(graph, child_id)
+        normalized_type = "branch" if len(remaining) == 1 else "merge"
+        graph.edges = [
+            self._with_edge_type(edge, normalized_type)
+            if edge.target == child_id and edge.type in STRUCTURAL_EDGE_TYPES
+            else edge
+            for edge in graph.edges
+        ]
+        self.workspace.save_graph(graph)
+        return self._structural_parent_edges(graph, child_id)
 
     def connect(self, source_id: str, target_id: str, edge_type: str) -> Edge:
         if edge_type not in CONNECT_EDGE_TYPES:
@@ -183,43 +264,7 @@ class GraphService:
             raise CanvasGPTError("Merge instruction cannot be empty.")
         merge_instruction = (instruction or "Create a unified, decision-ready synthesis.").strip()
         source_paths = [self._context_path(graph, node.id) for node in sources]
-        unique_segments: list[Node] = []
-        segment_message_counts: dict[str, int] = {}
-        for path in source_paths:
-            for segment, message_count in path:
-                if segment.id not in segment_message_counts:
-                    unique_segments.append(segment)
-                    segment_message_counts[segment.id] = message_count
-                else:
-                    segment_message_counts[segment.id] = max(
-                        segment_message_counts[segment.id], message_count
-                    )
-
-        transcript_sections = []
-        for node in unique_segments:
-            message_count = segment_message_counts[node.id]
-            transcript = "\n".join(
-                f"{message.role.upper()}: {message.content}"
-                for message in node.local_messages[:message_count]
-            )
-            transcript_sections.append(
-                f"## Segment {node.id}: {node.title} ({message_count} messages)\n"
-                f"{transcript or '[No local messages in this segment]'}"
-            )
-        path_descriptions = "\n".join(
-            f"- Source {source.id} ({source.title}): "
-            + " -> ".join(
-                f"{segment.id}[:{message_count}]" for segment, message_count in path
-            )
-            for source, path in zip(sources, source_paths)
-        )
-        request = (
-            f"Merge goal: {merge_instruction}\n\n"
-            "# Unique context segments\n"
-            + "\n\n---\n\n".join(transcript_sections)
-            + "\n\n# Selected source paths\n"
-            + path_descriptions
-        )
+        request = self._build_merge_request(sources, source_paths, merge_instruction)
         response = provider.generate([Message(role="user", content=request)], system_prompt=MERGE_SYSTEM_PROMPT)
         node_title = self._clean_title(title or self._default_merge_title(sources))
         node = Node(
@@ -239,9 +284,100 @@ class GraphService:
             ],
         )
         graph.nodes[node.id] = node
-        graph.edges.extend(Edge(source=source.id, target=node.id, type="merge") for source in sources)
+        graph.edges.extend(
+            Edge(
+                source=source.id,
+                target=node.id,
+                type="merge",
+                context_message_count=sum(count for _, count in path),
+                context_path=tuple((segment.id, count) for segment, count in path),
+            )
+            for source, path in zip(sources, source_paths)
+        )
         self.workspace.save_graph(graph)
         return node, response
+
+    def _commit_merge_draft(
+        self,
+        graph: Graph,
+        node: Node,
+        parent_edges: list[Edge],
+        instruction: str,
+        provider: Provider,
+    ) -> str:
+        sources = [self._get_node(graph, edge.source) for edge in parent_edges]
+        source_paths = [self._context_path_from_edge(graph, edge) for edge in parent_edges]
+        request = self._build_merge_request(sources, source_paths, instruction)
+        response = provider.generate(
+            [Message(role="user", content=request)], system_prompt=MERGE_SYSTEM_PROMPT
+        )
+        if node.title_source == "placeholder":
+            node.title = self._default_merge_title(sources)
+            node.title_source = "auto"
+        node.kind = "merge"
+        node.local_messages.extend(
+            [
+                Message(
+                    role="user",
+                    content=(
+                        f"Merged source nodes: {', '.join(source.id for source in sources)}\n"
+                        f"Goal: {instruction}"
+                    ),
+                ),
+                Message(role="assistant", content=response),
+            ]
+        )
+        node.updated_at = utc_now()
+        self.workspace.save_graph(graph)
+        return response
+
+    @staticmethod
+    def _build_merge_request(
+        sources: list[Node],
+        source_paths: list[list[tuple[Node, int]]],
+        instruction: str,
+    ) -> str:
+        unique_segments: list[Node] = []
+        segment_message_counts: dict[str, int] = {}
+        for path in source_paths:
+            for segment, message_count in path:
+                if segment.id not in segment_message_counts:
+                    unique_segments.append(segment)
+                    segment_message_counts[segment.id] = message_count
+                else:
+                    segment_message_counts[segment.id] = max(
+                        segment_message_counts[segment.id], message_count
+                    )
+
+        transcript_sections = []
+        for segment in unique_segments:
+            message_count = segment_message_counts[segment.id]
+            transcript = "\n".join(
+                f"{message.role.upper()}: {message.content}"
+                for message in segment.local_messages[:message_count]
+            )
+            transcript_sections.append(
+                f"## Segment {segment.id}: {segment.title} ({message_count} messages)\n"
+                f"{transcript or '[No local messages in this segment]'}"
+            )
+        path_descriptions = "\n".join(
+            f"- Source {source.id} ({source.title}): "
+            + (
+                " -> ".join(
+                    f"{segment.id}[:{message_count}]"
+                    for segment, message_count in path
+                )
+                or "[No context messages]"
+            )
+            for source, path in zip(sources, source_paths)
+        )
+        return (
+            f"Merge goal: {instruction}\n\n"
+            "# Unique context segments\n"
+            + ("\n\n---\n\n".join(transcript_sections) or "[No context messages]")
+            + "\n\n# Selected source paths\n"
+            + path_descriptions
+        )
 
     def _context_messages(self, graph: Graph, node_id: str) -> list[Message]:
         messages: list[Message] = []
@@ -272,6 +408,13 @@ class GraphService:
             return [(node, len(node.local_messages))]
 
         parent_edge = parent_edges[0]
+        if self._has_structural_path(graph, node_id, parent_edge.source):
+            raise CanvasGPTError(
+                f"Branch cycle detected: {parent_edge.source} -> {node_id}."
+            )
+        if parent_edge.context_path is not None:
+            inherited_path = self._context_path_from_edge(graph, parent_edge)
+            return [*inherited_path, (node, len(node.local_messages))]
         if parent_edge.context_message_count is None:
             raise CanvasGPTError(
                 f"Branch edge {parent_edge.source} -> {node_id} has no context boundary."
@@ -283,6 +426,111 @@ class GraphService:
             parent_path, parent_edge.context_message_count
         )
         return [*inherited_path, (node, len(node.local_messages))]
+
+    def _context_path_from_edge(
+        self, graph: Graph, edge: Edge
+    ) -> list[tuple[Node, int]]:
+        if edge.context_path is not None:
+            path = [
+                (self._get_node(graph, node_id), message_count)
+                for node_id, message_count in edge.context_path
+            ]
+            for segment, message_count in path:
+                if message_count < 0:
+                    raise CanvasGPTError("Context snapshot cannot be negative.")
+                if message_count > len(segment.local_messages):
+                    raise CanvasGPTError(
+                        "Context snapshot exceeds the stored conversation length."
+                    )
+            return path
+        if edge.context_message_count is None:
+            raise CanvasGPTError(
+                f"Structural edge {edge.source} -> {edge.target} has no context boundary."
+            )
+        return self._clip_context_path(
+            self._context_path(graph, edge.source), edge.context_message_count
+        )
+
+    def _snapshot_context_path(
+        self, graph: Graph, node_id: str
+    ) -> tuple[tuple[str, int], ...]:
+        return tuple(
+            (segment.id, message_count)
+            for segment, message_count in self._context_path(graph, node_id)
+            if message_count
+        )
+
+    def _freeze_outgoing_context_snapshots(
+        self, graph: Graph, node_id: str
+    ) -> None:
+        legacy_edges = [
+            edge
+            for edge in graph.edges
+            if edge.source == node_id
+            and edge.type in STRUCTURAL_EDGE_TYPES
+            and edge.context_path is None
+            and edge.context_message_count is not None
+        ]
+        if not legacy_edges:
+            return
+        current_path = self._context_path(graph, node_id)
+        replacements = {
+            edge: tuple(
+                (segment.id, message_count)
+                for segment, message_count in self._clip_context_path(
+                    current_path, edge.context_message_count or 0
+                )
+            )
+            for edge in legacy_edges
+        }
+        graph.edges = [
+            Edge(
+                source=edge.source,
+                target=edge.target,
+                type=edge.type,
+                context_message_count=edge.context_message_count,
+                context_path=replacements[edge],
+            )
+            if edge in replacements
+            else edge
+            for edge in graph.edges
+        ]
+
+    @staticmethod
+    def _structural_parent_edges(graph: Graph, node_id: str) -> list[Edge]:
+        return [
+            edge
+            for edge in graph.edges
+            if edge.target == node_id and edge.type in STRUCTURAL_EDGE_TYPES
+        ]
+
+    @staticmethod
+    def _with_edge_type(edge: Edge, edge_type: str) -> Edge:
+        return Edge(
+            source=edge.source,
+            target=edge.target,
+            type=edge_type,
+            context_message_count=edge.context_message_count,
+            context_path=edge.context_path,
+        )
+
+    @staticmethod
+    def _has_structural_path(graph: Graph, start_id: str, target_id: str) -> bool:
+        pending = [start_id]
+        visited: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current == target_id:
+                return True
+            if current in visited:
+                continue
+            visited.add(current)
+            pending.extend(
+                edge.target
+                for edge in graph.edges
+                if edge.source == current and edge.type in STRUCTURAL_EDGE_TYPES
+            )
+        return False
 
     @staticmethod
     def _clip_context_path(
