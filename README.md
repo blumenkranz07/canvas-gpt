@@ -83,6 +83,7 @@ Type `/exit` or `/quit` to leave it.
 
 ```text
 canvas-gpt init [--provider openai|anthropic] [--model MODEL]
+                [--context-window-tokens TOKENS] [--max-output-tokens TOKENS]
 canvas-gpt new "TITLE"
 canvas-gpt chat NODE_ID ["MESSAGE"]
 canvas-gpt branch SOURCE_ID "TITLE"
@@ -91,6 +92,7 @@ canvas-gpt connect SOURCE_ID TARGET_ID --type supports
 canvas-gpt graph
 canvas-gpt show NODE_ID
 canvas-gpt config [--provider PROVIDER] [--model MODEL]
+                  [--context-window-tokens TOKENS] [--max-output-tokens TOKENS]
 ```
 
 `merge` also accepts an instruction:
@@ -109,8 +111,8 @@ Running `init` creates:
 └── graph.json
 ```
 
-This directory is ignored by Git. `config.json` contains only the provider, model ID, and output
-token limit. Credentials are never written into it.
+This directory is ignored by Git. `config.json` contains only the provider, model ID, context
+window, and output token limit. Credentials are never written into it.
 `graph.json` uses schema version 2: each node stores only `local_messages`, while a branch edge
 records the exact inherited message boundary. Version 1 graphs are migrated automatically.
 
@@ -126,6 +128,27 @@ Change provider or model without resetting the graph:
 ```powershell
 cc config --provider anthropic --model claude-sonnet-5
 ```
+
+Set the context window to the value supported by the configured model:
+
+```powershell
+cc config --context-window-tokens 128000 --max-output-tokens 4096
+```
+
+## Context budget guard
+
+Before every chat or merge request, Canvas GPT estimates the full input size, including the system
+prompt and request framing. It reserves the configured output limit plus a safety margin of 5% of
+the context window (at least 256 tokens). Requests that do not fit fail locally with a budget
+breakdown before the provider is called or the graph is changed.
+
+The estimator is provider-neutral and intentionally conservative: it uses UTF-8 byte length and
+does not require a tokenizer package or network request. The configured context window defaults to
+128,000 tokens for compatibility with existing workspaces; set it explicitly when the selected
+model has a different limit.
+
+This guard does not silently truncate or summarize history. Automatic compaction can be added later
+on top of the same context planner without changing stored conversations.
 
 ## v0.1 semantics
 

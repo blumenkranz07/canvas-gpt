@@ -13,3 +13,6 @@ class NodeNotFoundError(CanvasGPTError):
 class ProviderError(CanvasGPTError):
     pass
 
+
+class ContextBudgetError(CanvasGPTError):
+    pass
