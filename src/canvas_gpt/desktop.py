@@ -15,7 +15,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    default_fake_provider: bool = False,
+) -> int:
     args = build_parser().parse_args(argv)
     try:
         import webview
@@ -36,7 +40,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         entrypoint = str(index_path)
 
-    api = DesktopAPI(args.root)
+    api = DesktopAPI(
+        args.root,
+        allow_fake_provider=default_fake_provider or args.dev_url is not None,
+    )
     window = webview.create_window(
         "Canvas GPT",
         url=entrypoint,
@@ -46,6 +53,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         min_size=(900, 600),
         frameless=True,
         easy_drag=False,
+        text_select=True,
         shadow=True,
         background_color="#f4f5f7",
     )
@@ -54,8 +62,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def entrypoint() -> None:
-    raise SystemExit(main())
+def entrypoint(*, default_fake_provider: bool = False) -> None:
+    raise SystemExit(main(default_fake_provider=default_fake_provider))
 
 
 if __name__ == "__main__":

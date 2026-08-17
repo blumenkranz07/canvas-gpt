@@ -84,6 +84,11 @@ class DesktopAPITests(unittest.TestCase):
         first = self.api.create_node()["data"]
         second = self.api.create_node()["data"]
         child = self.api.create_node()["data"]
+        workspace = Workspace(self.root)
+        graph = workspace.load_graph()
+        graph.nodes[first["id"]].local_messages = [Message(role="user", content="First")]
+        graph.nodes[second["id"]].local_messages = [Message(role="user", content="Second")]
+        workspace.save_graph(graph)
 
         first_connection = self.api.add_draft_parent(child["id"], first["id"])
         second_connection = self.api.add_draft_parent(child["id"], second["id"])
@@ -106,6 +111,55 @@ class DesktopAPITests(unittest.TestCase):
         self.assertEqual(len(incoming), 1)
         self.assertEqual(incoming[0]["type"], "branch")
 
+    def test_freeze_and_merge_successor_capabilities_are_exposed_in_snapshot(self) -> None:
+        self.api.initialize_workspace()
+        first = self.api.create_node()["data"]
+        second = self.api.create_node()["data"]
+        child = self.api.create_node()["data"]
+        empty = self.api.create_node()["data"]
+        workspace = Workspace(self.root)
+        graph = workspace.load_graph()
+        graph.nodes[first["id"]].local_messages = [Message(role="user", content="First")]
+        graph.nodes[second["id"]].local_messages = [Message(role="user", content="Second")]
+        workspace.save_graph(graph)
+        self.assertTrue(self.api.attach_parent(child["id"], first["id"])["ok"])
+        graph = workspace.load_graph()
+        graph.nodes[child["id"]].local_messages = [
+            Message(role="user", content="Committed history")
+        ]
+        workspace.save_graph(graph)
+
+        snapshot = self.api.bootstrap()["data"]
+        child_record = next(node for node in snapshot["nodes"] if node["id"] == child["id"])
+        first_record = next(node for node in snapshot["nodes"] if node["id"] == first["id"])
+        empty_record = next(node for node in snapshot["nodes"] if node["id"] == empty["id"])
+        parent_edge = next(edge for edge in snapshot["edges"] if edge["target"] == child["id"])
+        self.assertFalse(child_record["deletable"])
+        self.assertFalse(child_record["frozen"])
+        self.assertTrue(first_record["frozen"])
+        self.assertEqual(first_record["child_count"], 1)
+        self.assertEqual(first_record["max_children"], 50)
+        self.assertTrue(empty_record["deletable"])
+        self.assertFalse(parent_edge["deletable"])
+
+        replaced = self.api.attach_parent(child["id"], second["id"])
+        self.assertFalse(replaced["ok"])
+        self.assertIn("cannot be changed", replaced["error"])
+        successor = self.api.create_merge_draft([child["id"], second["id"]])
+        self.assertTrue(successor["ok"])
+        self.assertFalse(self.api.delete_node(child["id"])["ok"])
+        self.assertTrue(self.api.delete_node(empty["id"])["ok"])
+
+        snapshot = self.api.bootstrap()["data"]
+        child_record = next(node for node in snapshot["nodes"] if node["id"] == child["id"])
+        successor_record = next(
+            node for node in snapshot["nodes"] if node["id"] == successor["data"]["id"]
+        )
+        self.assertEqual(child_record["parent_ids"], [first["id"]])
+        self.assertEqual(set(successor_record["parent_ids"]), {child["id"], second["id"]})
+        self.assertTrue(child_record["frozen"])
+        self.assertFalse(any(node["id"] == empty["id"] for node in snapshot["nodes"]))
+
     def test_new_graph_clears_nodes_but_preserves_config(self) -> None:
         self.api.initialize_workspace()
         self.api.create_node()
@@ -115,6 +169,36 @@ class DesktopAPITests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["data"]["nodes"], [])
         self.assertEqual(result["data"]["config"]["provider"], "openai")
+
+    def test_provider_switching_and_fake_are_gated_by_desktop_build(self) -> None:
+        self.api.initialize_workspace()
+        release_snapshot = self.api.bootstrap()["data"]
+        self.assertEqual(
+            [item["id"] for item in release_snapshot["config"]["available_providers"]],
+            ["openai", "anthropic"],
+        )
+        self.assertFalse(self.api.update_provider("fake")["ok"])
+
+        dev_api = DesktopAPI(self.root, allow_fake_provider=True)
+        switched = dev_api.update_provider("fake")
+        self.assertTrue(switched["ok"])
+        self.assertTrue(switched["data"]["config"]["api_key_configured"])
+        self.assertEqual(switched["data"]["config"]["model"], "dev-context-echo")
+        self.assertEqual(
+            [item["id"] for item in switched["data"]["config"]["available_providers"]],
+            ["openai", "anthropic", "fake"],
+        )
+
+        node_id = dev_api.create_node()["data"]["id"]
+        response = dev_api.chat(node_id, "xx")
+        self.assertTrue(response["ok"])
+        self.assertIn("【FAKE · Request echo】", response["data"]["response"])
+        self.assertNotIn("Current node", response["data"]["response"])
+        self.assertIn("[1] USER\nxx", response["data"]["response"])
+
+        real = dev_api.update_provider("anthropic")
+        self.assertTrue(real["ok"])
+        self.assertEqual(real["data"]["config"]["model"], "claude-sonnet-5")
 
     def test_window_controls_are_exposed_through_bridge(self) -> None:
         class EventHook:

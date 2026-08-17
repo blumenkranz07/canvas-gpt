@@ -8,6 +8,10 @@ export interface NodeRecord {
   local_message_count: number;
   message_count: number;
   parent_ids?: string[];
+  deletable?: boolean;
+  frozen?: boolean;
+  child_count?: number;
+  max_children?: number;
   created_at: string;
   updated_at: string;
 }
@@ -17,6 +21,7 @@ export interface EdgeRecord {
   target: string;
   type: string;
   context_message_count: number | null;
+  deletable?: boolean;
 }
 
 export interface MessageRecord {
@@ -29,6 +34,14 @@ export interface ConfigStatus {
   model: string;
   api_key_environment: string;
   api_key_configured: boolean;
+  available_providers: ProviderOption[];
+}
+
+export interface ProviderOption {
+  id: string;
+  label: string;
+  model: string;
+  is_dev: boolean;
 }
 
 export interface UiState {

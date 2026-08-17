@@ -7,7 +7,9 @@ from unittest.mock import patch
 
 from canvas_gpt.errors import ProviderError
 from canvas_gpt.models import Config, Message
+from canvas_gpt.providers import build_provider
 from canvas_gpt.providers.anthropic_provider import AnthropicProvider
+from canvas_gpt.providers.fake_provider import FakeProvider
 from canvas_gpt.providers.openai_provider import OpenAIProvider
 
 
@@ -30,6 +32,34 @@ class RaisingEndpoint:
 
 
 class ProviderTests(unittest.TestCase):
+    def test_fake_provider_echoes_labeled_full_request(self) -> None:
+        provider = FakeProvider()
+        system_prompt = "You are a helpful assistant."
+        messages = [
+            Message("user", "Parent question"),
+            Message("assistant", "Parent answer"),
+            Message("user", "xx"),
+        ]
+
+        with patch("builtins.print") as print_mock:
+            result = provider.generate(messages, system_prompt=system_prompt)
+
+        self.assertIn("【FAKE · Request echo】", result)
+        self.assertIn("--- SYSTEM ---\nYou are a helpful assistant.", result)
+        self.assertIn("--- MESSAGES ---", result)
+        self.assertIn("[1] USER\nParent question", result)
+        self.assertIn("[2] ASSISTANT\nParent answer", result)
+        self.assertIn("[3] USER\nxx", result)
+        print_mock.assert_called_once_with(result, flush=True)
+
+    def test_fake_provider_requires_explicit_dev_gate(self) -> None:
+        config = Config(provider="fake", model="dev-context-echo")
+
+        with self.assertRaisesRegex(Exception, "Unsupported provider"):
+            build_provider(config)
+
+        self.assertIsInstance(build_provider(config, allow_fake=True), FakeProvider)
+
     def test_openai_provider_uses_responses_api_payload(self) -> None:
         endpoint = RecordingEndpoint(SimpleNamespace(output_text=" OpenAI answer "))
         provider = OpenAIProvider.__new__(OpenAIProvider)

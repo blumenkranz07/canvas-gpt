@@ -9,7 +9,12 @@ from . import __version__
 from .errors import CanvasGPTError
 from .models import DEFAULT_MODELS, Config, Graph, Message, Node
 from .providers import Provider, build_provider
-from .service import CONNECT_EDGE_TYPES, GraphService
+from .service import (
+    MAX_NODE_CHILDREN,
+    CONNECT_EDGE_TYPES,
+    STRUCTURAL_EDGE_TYPES,
+    GraphService,
+)
 from .storage import Workspace
 
 
@@ -19,7 +24,7 @@ ProviderFactory = Callable[[Config], Provider]
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="canvas-gpt",
-        description="Branch, connect, and merge AI conversations from your terminal.",
+        description="Build controlled, branching AI conversations from your terminal.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -30,14 +35,18 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--max-output-tokens", type=int, default=2048)
     init_parser.add_argument("--force", action="store_true", help="Reset existing local graph data.")
 
-    new_parser = commands.add_parser("new", help="Create an empty conversation node.")
+    new_parser = commands.add_parser("new", help="Create an empty Draft.")
     new_parser.add_argument("title")
 
-    chat_parser = commands.add_parser("chat", help="Chat inside a node.")
+    chat_parser = commands.add_parser(
+        "chat", help="Chat in a Draft or active leaf discussion."
+    )
     chat_parser.add_argument("node_id")
     chat_parser.add_argument("message", nargs="?", help="Omit to enter interactive chat mode.")
 
-    branch_parser = commands.add_parser("branch", help="Fork a node with its conversation context.")
+    branch_parser = commands.add_parser(
+        "branch", help="Capture a discussion's context in a new Draft."
+    )
     branch_parser.add_argument("source_id")
     branch_parser.add_argument("title")
 
@@ -45,7 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
     rename_parser.add_argument("node_id")
     rename_parser.add_argument("title")
 
-    merge_parser = commands.add_parser("merge", help="Synthesize any two or more nodes.")
+    merge_parser = commands.add_parser(
+        "merge", help="Synthesize two or more discussions into a new node."
+    )
     merge_parser.add_argument("source_ids", nargs="+")
     merge_parser.add_argument("--title")
     merge_parser.add_argument("--instruction", help="Tell the model how to synthesize the sources.")
@@ -101,7 +112,13 @@ def main(
             _print_graph(workspace.load_graph())
         elif args.command == "show":
             node = service.get_node(args.node_id)
-            _print_node(node, service.context_messages(args.node_id))
+            graph = workspace.load_graph()
+            child_count = sum(
+                1
+                for edge in graph.edges
+                if edge.source == node.id and edge.type in STRUCTURAL_EDGE_TYPES
+            )
+            _print_node(node, service.context_messages(args.node_id), child_count)
         elif args.command in {"chat", "merge"}:
             config = workspace.load_config()
             service.provider = provider_factory(config)
@@ -192,9 +209,16 @@ def _print_graph(graph: Graph) -> None:
         return
     print("Nodes")
     for node in sorted(graph.nodes.values(), key=_node_sort_key):
+        child_count = sum(
+            1
+            for edge in graph.edges
+            if edge.source == node.id and edge.type in STRUCTURAL_EDGE_TYPES
+        )
+        state = "Draft" if not node.local_messages else "Frozen" if child_count else "Active"
         print(
             f"  [{node.id}] {node.title} "
-            f"({node.kind}, {len(node.local_messages)} local messages)"
+            f"({state}, {len(node.local_messages)} local messages, "
+            f"{child_count}/{MAX_NODE_CHILDREN} children)"
         )
     print("Edges")
     if not graph.edges:
@@ -204,9 +228,14 @@ def _print_graph(graph: Graph) -> None:
             print(f"  {edge.source} --{edge.type}--> {edge.target}")
 
 
-def _print_node(node: Node, context_messages: list[Message]) -> None:
+def _print_node(
+    node: Node, context_messages: list[Message], child_count: int = 0
+) -> None:
     print(f"[{node.id}] {node.title}")
     print(f"Kind: {node.kind}")
+    state = "Draft" if not node.local_messages else "Frozen" if child_count else "Active"
+    print(f"State: {state}")
+    print(f"Children: {child_count}/{MAX_NODE_CHILDREN}")
     print(f"Updated: {node.updated_at}")
     inherited_count = len(context_messages) - len(node.local_messages)
     print(f"Inherited messages: {inherited_count}")
